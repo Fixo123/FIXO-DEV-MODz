@@ -1,0 +1,15 @@
+{
+  "name": "fixo-dev-mods",
+  "version": "1.0.0",
+  "description": "FIXO DEV MODz - APK Mod Download Website with Admin Panel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.0.3",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2"
+  }
+}
