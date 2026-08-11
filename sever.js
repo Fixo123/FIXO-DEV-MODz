@@ -1,5 +1,4 @@
 const express = require('express');
-const mysql = require('mysql2');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const http = require('http');
@@ -9,10 +8,7 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 const PORT = process.env.PORT || 3000;
@@ -22,167 +18,145 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- MySQL CONNECTION (Pool) ----------
-const pool = mysql.createPool({
-  host: 'mysql.railway.internal',
-  user: 'root',
-  password: 'OklBKEcqBkQvgCjklhfclqJgmjsOXugE',
-  database: 'railway',
-  port: 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+// ---------- IN-MEMORY STORAGE ----------
+let apps = [];                     // Array to store apps { id, name, version, description, downloadUrl, imageUrl, category, createdAt }
+let appIdCounter = 1;
 
-// Test connection and create table if not exists
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error('❌ MySQL connection error:', err.message);
-    console.log('⚠️  Server will continue without database (some features may fail)');
-  } else {
-    console.log('✅ MySQL connected successfully');
-    
-    // Create apps table if not exists
-    const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS apps (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        version VARCHAR(50) NOT NULL,
-        description TEXT,
-        downloadUrl VARCHAR(512) NOT NULL,
-        imageUrl VARCHAR(512) NOT NULL,
-        category VARCHAR(100),
-        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
-    
-    connection.query(createTableSQL, (err) => {
-      if (err) {
-        console.error('❌ Error creating table:', err.message);
-      } else {
-        console.log('✅ Apps table ready');
-      }
-      connection.release();
-    });
-  }
-});
-
-// Promise wrapper for pool
-const query = (sql, params) => {
-  return new Promise((resolve, reject) => {
-    pool.query(sql, params, (err, results) => {
-      if (err) reject(err);
-      else resolve(results);
-    });
-  });
+// Traffic Statistics
+let stats = {
+  totalViews: 0,
+  uniqueVisitors: new Set(),       // Store IP addresses or session IDs
+  todayViews: 0,
+  lastResetDate: new Date().toDateString(),
+  totalApps: 0
 };
+
+// Reset todayViews at midnight (simple check on each request)
+function resetTodayViewsIfNeeded() {
+  const today = new Date().toDateString();
+  if (stats.lastResetDate !== today) {
+    stats.todayViews = 0;
+    stats.lastResetDate = today;
+  }
+}
+
+// ---------- TRAFFIC TRACKING MIDDLEWARE ----------
+app.use((req, res, next) => {
+  // Only track page views (GET requests for HTML pages)
+  if (req.method === 'GET' && (req.path === '/' || req.path === '/admin' || req.path === '/admin.html')) {
+    resetTodayViewsIfNeeded();
+    
+    // Get visitor IP (handle proxy headers)
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    
+    stats.totalViews += 1;
+    stats.todayViews += 1;
+    stats.uniqueVisitors.add(ip);
+    stats.totalApps = apps.length;
+    
+    console.log(`📊 Traffic: Total=${stats.totalViews}, Today=${stats.todayViews}, Unique=${stats.uniqueVisitors.size}`);
+  }
+  next();
+});
 
 // ---------- ROUTES ----------
 
-// 1. Admin Login (password check only - no DB dependency)
+// 1. Admin Login (no DB)
 app.post('/api/admin/login', (req, res) => {
-  try {
-    const { password } = req.body;
-    console.log('Login attempt with password:', password);
-    
-    if (password === 'oshan123#') {
-      return res.json({ success: true, message: 'Login successful' });
-    } else {
-      return res.status(401).json({ success: false, message: 'Invalid password' });
-    }
-  } catch (err) {
-    console.error('Login error:', err);
-    return res.status(500).json({ success: false, message: 'Server error' });
+  const { password } = req.body;
+  if (password === 'oshan123#') {
+    return res.json({ success: true, message: 'Login successful' });
+  } else {
+    return res.status(401).json({ success: false, message: 'Invalid password' });
   }
 });
 
-// 2. Get all apps
-app.get('/api/apps', async (req, res) => {
-  try {
-    const results = await query('SELECT * FROM apps ORDER BY createdAt DESC');
-    res.json(results);
-  } catch (err) {
-    console.error('Error fetching apps:', err);
-    res.status(500).json({ error: err.message });
-  }
+// 2. Get all apps (public)
+app.get('/api/apps', (req, res) => {
+  res.json(apps);
 });
 
-// 3. Add new app (admin only)
-app.post('/api/apps', async (req, res) => {
+// 3. Get traffic stats (admin only - token protected)
+app.get('/api/stats', (req, res) => {
+  const token = req.headers['x-admin-token'];
+  if (token !== 'oshan123#') {
+    return res.status(403).json({ success: false, message: 'Unauthorized' });
+  }
+  res.json({
+    totalViews: stats.totalViews,
+    uniqueVisitors: stats.uniqueVisitors.size,
+    todayViews: stats.todayViews,
+    totalApps: apps.length,
+    lastResetDate: stats.lastResetDate
+  });
+});
+
+// 4. Add new app (admin only)
+app.post('/api/apps', (req, res) => {
   const token = req.headers['x-admin-token'];
   if (token !== 'oshan123#') {
     return res.status(403).json({ success: false, message: 'Unauthorized' });
   }
 
-  try {
-    const { name, version, description, downloadUrl, imageUrl, category } = req.body;
-    const sql = `
-      INSERT INTO apps (name, version, description, downloadUrl, imageUrl, category)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `;
-    const params = [name, version, description, downloadUrl, imageUrl, category];
-    const result = await query(sql, params);
-    
-    // Get the newly inserted app
-    const newApp = await query('SELECT * FROM apps WHERE id = ?', [result.insertId]);
-    
-    // Emit real-time update
-    io.emit('apps-updated');
-    
-    res.json({ success: true, app: newApp[0] });
-  } catch (err) {
-    console.error('Error adding app:', err);
-    res.status(500).json({ error: err.message });
+  const { name, version, description, downloadUrl, imageUrl, category } = req.body;
+  if (!name || !downloadUrl || !imageUrl) {
+    return res.status(400).json({ success: false, message: 'Name, Download URL and Image URL are required' });
   }
+
+  const newApp = {
+    id: appIdCounter++,
+    name,
+    version: version || '1.0',
+    description: description || '',
+    downloadUrl,
+    imageUrl,
+    category: category || 'General',
+    createdAt: new Date().toISOString()
+  };
+  apps.push(newApp);
+  stats.totalApps = apps.length;
+  
+  io.emit('apps-updated');   // Real-time update
+  res.json({ success: true, app: newApp });
 });
 
-// 4. Delete app (admin only)
-app.delete('/api/apps/:id', async (req, res) => {
+// 5. Delete app (admin only)
+app.delete('/api/apps/:id', (req, res) => {
   const token = req.headers['x-admin-token'];
   if (token !== 'oshan123#') {
     return res.status(403).json({ success: false, message: 'Unauthorized' });
   }
 
-  try {
-    const id = req.params.id;
-    await query('DELETE FROM apps WHERE id = ?', [id]);
-    
-    // Emit real-time update
-    io.emit('apps-updated');
-    
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Error deleting app:', err);
-    res.status(500).json({ error: err.message });
+  const id = parseInt(req.params.id);
+  const index = apps.findIndex(a => a.id === id);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: 'App not found' });
   }
+  apps.splice(index, 1);
+  stats.totalApps = apps.length;
+  
+  io.emit('apps-updated');
+  res.json({ success: true });
 });
 
 // Serve frontend
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
-
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ---------- SOCKET.IO ----------
-io.on('connection', async (socket) => {
+io.on('connection', (socket) => {
   console.log('🔌 New client connected');
-  try {
-    const apps = await query('SELECT * FROM apps ORDER BY createdAt DESC');
-    socket.emit('initial-apps', apps);
-  } catch (err) {
-    console.error('Error sending initial apps:', err);
-  }
-
-  socket.on('disconnect', () => {
-    console.log('🔌 Client disconnected');
-  });
+  socket.emit('initial-apps', apps);
+  socket.on('disconnect', () => console.log('🔌 Client disconnected'));
 });
 
-// Start server
+// ---------- START SERVER ----------
 server.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`🔌 WebSocket (Socket.IO) enabled`);
+  console.log(`💾 In-Memory Storage (no database)`);
 });
