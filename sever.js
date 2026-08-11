@@ -1,5 +1,5 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const mysql = require('mysql2');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const http = require('http');
@@ -17,89 +17,74 @@ const io = socketIo(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// ---------- MIDDLEWARE ----------
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// MongoDB Connection with better error handling
-const MONGODB_URI = 'mongodb+srv://nima:nima@nimabot.gkpbhvh.mongodb.net';
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('✅ MongoDB connected successfully');
-  // Start server only after DB connection
-  server.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-    console.log(`🔌 WebSocket (Socket.IO) enabled`);
-  });
-})
-.catch(err => {
-  console.error('❌ MongoDB connection error:', err);
-  console.log('⚠️  Starting server without MongoDB (using in-memory fallback)');
-  // Still start the server even if DB fails (for demo)
-  server.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT} (without DB)`);
-  });
+// ---------- MySQL CONNECTION (Pool) ----------
+const pool = mysql.createPool({
+  host: 'mysql.railway.internal',
+  user: 'root',
+  password: 'OklBKEcqBkQvgCjklhfclqJgmjsOXugE',
+  database: 'railway',
+  port: 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-// App Schema (fallback to in-memory if DB fails)
-let App;
-let inMemoryApps = [];
+// Test connection and create table if not exists
+pool.getConnection((err, connection) => {
+  if (err) {
+    console.error('❌ MySQL connection error:', err.message);
+    console.log('⚠️  Server will continue without database (some features may fail)');
+  } else {
+    console.log('✅ MySQL connected successfully');
+    
+    // Create apps table if not exists
+    const createTableSQL = `
+      CREATE TABLE IF NOT EXISTS apps (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        version VARCHAR(50) NOT NULL,
+        description TEXT,
+        downloadUrl VARCHAR(512) NOT NULL,
+        imageUrl VARCHAR(512) NOT NULL,
+        category VARCHAR(100),
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    
+    connection.query(createTableSQL, (err) => {
+      if (err) {
+        console.error('❌ Error creating table:', err.message);
+      } else {
+        console.log('✅ Apps table ready');
+      }
+      connection.release();
+    });
+  }
+});
 
-try {
-  const appSchema = new mongoose.Schema({
-    name: String,
-    version: String,
-    description: String,
-    downloadUrl: String,
-    imageUrl: String,
-    category: String,
-    createdAt: { type: Date, default: Date.now },
+// Promise wrapper for pool
+const query = (sql, params) => {
+  return new Promise((resolve, reject) => {
+    pool.query(sql, params, (err, results) => {
+      if (err) reject(err);
+      else resolve(results);
+    });
   });
-  App = mongoose.model('App', appSchema);
-} catch (e) {
-  // If mongoose model already defined, use it
-  App = mongoose.model('App');
-}
-
-// ---------- Helper functions ----------
-async function getAllApps() {
-  if (mongoose.connection.readyState === 1) {
-    return await App.find().sort({ createdAt: -1 });
-  } else {
-    return inMemoryApps.sort((a, b) => b.createdAt - a.createdAt);
-  }
-}
-
-async function addApp(data) {
-  if (mongoose.connection.readyState === 1) {
-    const newApp = new App(data);
-    await newApp.save();
-    return newApp;
-  } else {
-    const newApp = { ...data, _id: Date.now().toString(), createdAt: Date.now() };
-    inMemoryApps.push(newApp);
-    return newApp;
-  }
-}
-
-async function deleteApp(id) {
-  if (mongoose.connection.readyState === 1) {
-    await App.findByIdAndDelete(id);
-  } else {
-    inMemoryApps = inMemoryApps.filter(app => app._id !== id);
-  }
-}
+};
 
 // ---------- ROUTES ----------
 
-// 1. Admin Login (check password = oshan123#)
-app.post('/api/admin/login', async (req, res) => {
+// 1. Admin Login (password check only - no DB dependency)
+app.post('/api/admin/login', (req, res) => {
   try {
     const { password } = req.body;
+    console.log('Login attempt with password:', password);
+    
     if (password === 'oshan123#') {
       return res.json({ success: true, message: 'Login successful' });
     } else {
@@ -114,8 +99,8 @@ app.post('/api/admin/login', async (req, res) => {
 // 2. Get all apps
 app.get('/api/apps', async (req, res) => {
   try {
-    const apps = await getAllApps();
-    res.json(apps);
+    const results = await query('SELECT * FROM apps ORDER BY createdAt DESC');
+    res.json(results);
   } catch (err) {
     console.error('Error fetching apps:', err);
     res.status(500).json({ error: err.message });
@@ -131,9 +116,20 @@ app.post('/api/apps', async (req, res) => {
 
   try {
     const { name, version, description, downloadUrl, imageUrl, category } = req.body;
-    const newApp = await addApp({ name, version, description, downloadUrl, imageUrl, category });
+    const sql = `
+      INSERT INTO apps (name, version, description, downloadUrl, imageUrl, category)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
+    const params = [name, version, description, downloadUrl, imageUrl, category];
+    const result = await query(sql, params);
+    
+    // Get the newly inserted app
+    const newApp = await query('SELECT * FROM apps WHERE id = ?', [result.insertId]);
+    
+    // Emit real-time update
     io.emit('apps-updated');
-    res.json({ success: true, app: newApp });
+    
+    res.json({ success: true, app: newApp[0] });
   } catch (err) {
     console.error('Error adding app:', err);
     res.status(500).json({ error: err.message });
@@ -148,8 +144,12 @@ app.delete('/api/apps/:id', async (req, res) => {
   }
 
   try {
-    await deleteApp(req.params.id);
+    const id = req.params.id;
+    await query('DELETE FROM apps WHERE id = ?', [id]);
+    
+    // Emit real-time update
     io.emit('apps-updated');
+    
     res.json({ success: true });
   } catch (err) {
     console.error('Error deleting app:', err);
@@ -170,7 +170,7 @@ app.get('/', (req, res) => {
 io.on('connection', async (socket) => {
   console.log('🔌 New client connected');
   try {
-    const apps = await getAllApps();
+    const apps = await query('SELECT * FROM apps ORDER BY createdAt DESC');
     socket.emit('initial-apps', apps);
   } catch (err) {
     console.error('Error sending initial apps:', err);
@@ -179,4 +179,10 @@ io.on('connection', async (socket) => {
   socket.on('disconnect', () => {
     console.log('🔌 Client disconnected');
   });
+});
+
+// Start server
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🔌 WebSocket (Socket.IO) enabled`);
 });
