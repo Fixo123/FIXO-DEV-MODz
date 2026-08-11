@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>FIXO DEV MODz</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"/>
-  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
   <style>
     /* ===== RESET & BASE ===== */
     * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
@@ -336,15 +335,26 @@
       el.addEventListener('click', e => { if(e.target===el) el.classList.remove('active'); });
     });
 
-    // ADMIN ACCESS (Password Protected)
+    // ADMIN ACCESS
     function adminAccess() {
       const pwd = prompt('Enter admin password:');
       if (pwd === 'oshan123#') window.location.href = '/admin';
       else if (pwd !== null) alert('Incorrect password!');
     }
 
-    // SOCKET.IO & RENDER APPS
-    const socket = io();
+    // LOAD APPS
+    async function loadApps() {
+      try {
+        const res = await fetch('/api/apps');
+        if (!res.ok) throw new Error('Failed to load apps');
+        const apps = await res.json();
+        renderApps(apps);
+      } catch (err) {
+        console.error('Error loading apps:', err);
+        document.getElementById('appsGrid').innerHTML = '<p style="color:#ff6b6b;">Error loading apps</p>';
+      }
+    }
+
     function renderApps(apps) {
       const grid = document.getElementById('appsGrid');
       if (!grid) return;
@@ -364,15 +374,9 @@
       `).join('');
     }
 
-    socket.on('initial-apps', renderApps);
-    socket.on('apps-updated', async () => {
-      const res = await fetch('/api/apps');
-      const apps = await res.json();
-      renderApps(apps);
-    });
-
     // SEARCH
     document.addEventListener('DOMContentLoaded', () => {
+      loadApps(); // Load apps on page load
       const input = document.getElementById('searchInput');
       const btn = document.getElementById('searchBtn');
       function filter() {
@@ -387,6 +391,11 @@
       btn?.addEventListener('click', filter);
       input?.addEventListener('keyup', e => { if(e.key === 'Enter') filter(); });
     });
+
+    // Auto-refresh apps every 30 seconds (polling)
+    setInterval(() => {
+      loadApps();
+    }, 30000);
   </script>
 </body>
-        </html>
+      </html>
