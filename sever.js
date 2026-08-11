@@ -1,37 +1,30 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const http = require('http');
-const socketIo = require('socket.io');
 const path = require('path');
 
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
-});
-
 const PORT = process.env.PORT || 3000;
 
-// ---------- MIDDLEWARE ----------
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- IN-MEMORY STORAGE ----------
-let apps = [];                     // Array to store apps { id, name, version, description, downloadUrl, imageUrl, category, createdAt }
+let apps = [];
 let appIdCounter = 1;
 
 // Traffic Statistics
 let stats = {
   totalViews: 0,
-  uniqueVisitors: new Set(),       // Store IP addresses or session IDs
+  uniqueVisitors: new Set(),
   todayViews: 0,
   lastResetDate: new Date().toDateString(),
   totalApps: 0
 };
 
-// Reset todayViews at midnight (simple check on each request)
+// Reset todayViews at midnight
 function resetTodayViewsIfNeeded() {
   const today = new Date().toDateString();
   if (stats.lastResetDate !== today) {
@@ -40,20 +33,15 @@ function resetTodayViewsIfNeeded() {
   }
 }
 
-// ---------- TRAFFIC TRACKING MIDDLEWARE ----------
+// Traffic tracking middleware
 app.use((req, res, next) => {
-  // Only track page views (GET requests for HTML pages)
   if (req.method === 'GET' && (req.path === '/' || req.path === '/admin' || req.path === '/admin.html')) {
     resetTodayViewsIfNeeded();
-    
-    // Get visitor IP (handle proxy headers)
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-    
     stats.totalViews += 1;
     stats.todayViews += 1;
     stats.uniqueVisitors.add(ip);
     stats.totalApps = apps.length;
-    
     console.log(`📊 Traffic: Total=${stats.totalViews}, Today=${stats.todayViews}, Unique=${stats.uniqueVisitors.size}`);
   }
   next();
@@ -61,22 +49,32 @@ app.use((req, res, next) => {
 
 // ---------- ROUTES ----------
 
-// 1. Admin Login (no DB)
+// 1. Admin Login
 app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  if (password === 'oshan123#') {
-    return res.json({ success: true, message: 'Login successful' });
-  } else {
-    return res.status(401).json({ success: false, message: 'Invalid password' });
+  try {
+    const { password } = req.body;
+    console.log('Login attempt with:', password);
+    if (password === 'oshan123#') {
+      return res.json({ success: true, message: 'Login successful' });
+    } else {
+      return res.status(401).json({ success: false, message: 'Invalid password' });
+    }
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// 2. Get all apps (public)
+// 2. Get all apps
 app.get('/api/apps', (req, res) => {
-  res.json(apps);
+  try {
+    res.json(apps);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// 3. Get traffic stats (admin only - token protected)
+// 3. Get traffic stats (admin only)
 app.get('/api/stats', (req, res) => {
   const token = req.headers['x-admin-token'];
   if (token !== 'oshan123#') {
@@ -116,7 +114,6 @@ app.post('/api/apps', (req, res) => {
   apps.push(newApp);
   stats.totalApps = apps.length;
   
-  io.emit('apps-updated');   // Real-time update
   res.json({ success: true, app: newApp });
 });
 
@@ -135,7 +132,6 @@ app.delete('/api/apps/:id', (req, res) => {
   apps.splice(index, 1);
   stats.totalApps = apps.length;
   
-  io.emit('apps-updated');
   res.json({ success: true });
 });
 
@@ -147,16 +143,8 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ---------- SOCKET.IO ----------
-io.on('connection', (socket) => {
-  console.log('🔌 New client connected');
-  socket.emit('initial-apps', apps);
-  socket.on('disconnect', () => console.log('🔌 Client disconnected'));
-});
-
 // ---------- START SERVER ----------
-server.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`🔌 WebSocket (Socket.IO) enabled`);
-  console.log(`💾 In-Memory Storage (no database)`);
+  console.log(`💾 In-Memory Storage (no WebSocket)`);
 });
